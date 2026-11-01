@@ -36,6 +36,15 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "==> Installing Docker"
   curl -fsSL https://get.docker.com | sudo env DEBIAN_FRONTEND=noninteractive sh
 fi
+
+if ! docker compose version >/dev/null 2>&1; then
+  echo "==> Installing the Docker Compose plugin"
+  if ! $APT install -y docker-compose-v2; then
+    echo "docker-compose-v2 is not available. Installing docker-compose-plugin from Docker's repository"
+    curl -fsSL https://get.docker.com | sudo env DEBIAN_FRONTEND=noninteractive sh
+    $APT install -y docker-compose-plugin
+  fi
+fi
 sudo usermod -aG docker "$USER"
 
 echo "==> Installing the Nginx site"
