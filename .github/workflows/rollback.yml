@@ -1,0 +1,88 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to roll back
+        type: choice
+        required: true
+        options:
+          - api
+          - web
+      tag:
+        description: Full commit SHA (40 characters) of an image already on Docker Hub
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rollback
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      SERVICE: ${{ inputs.service }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate inputs
+        run: |
+          case "$SERVICE" in
+            api|web) ;;
+            *) echo "Invalid service"; exit 1 ;;
+          esac
+          if ! printf '%s' "$TAG" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Tag must be a full 40-character lowercase commit SHA"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host dockside
+            HostName $VPS_HOST
+            User $VPS_USER
+            IdentityFile ~/.ssh/id_deploy
+            BatchMode yes
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Roll back on the server
+        run: |
+          ssh dockside bash -s -- "$SERVICE" "$TAG" <<'REMOTE'
+          set -euo pipefail
+          SERVICE="$1"
+          TAG="$2"
+          cd ~/dockside
+          COMPOSE="docker compose -f docker-compose.prod.yaml"
+          VAR="$(printf '%s' "$SERVICE" | tr 'a-z' 'A-Z')_TAG"
+          PREVIOUS="$(grep "^$VAR=" .env | cut -d= -f2)"
+          echo "Rolling back $SERVICE from $PREVIOUS to $TAG"
+
+          $COMPOSE pull "$SERVICE" || true
+          sed -i "s|^$VAR=.*|$VAR=$TAG|" .env
+          $COMPOSE pull "$SERVICE"
+          $COMPOSE up -d --wait --no-deps "$SERVICE"
+
+          $COMPOSE ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'
+          REMOTE
+
+      - name: Smoke test through Nginx
+        run: |
+          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors -o /dev/null \
+            -w "api health: %{http_code}\n" "http://$VPS_HOST/api/v1/health"
+          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors -o /dev/null \
+            -w "home page: %{http_code}\n" "http://$VPS_HOST/"
