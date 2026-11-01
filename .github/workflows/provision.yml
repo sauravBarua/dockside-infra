@@ -1,0 +1,64 @@
+name: Provision server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker-compose.prod.yaml
+      - nginx/**
+      - scripts/**
+      - .github/workflows/provision.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host dockside
+            HostName $VPS_HOST
+            User $VPS_USER
+            IdentityFile ~/.ssh/id_deploy
+            BatchMode yes
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Copy infra files
+        run: |
+          tar czf - docker-compose.prod.yaml nginx scripts \
+            | ssh dockside 'mkdir -p ~/dockside && tar xzf - -C ~/dockside'
+
+      - name: Prepare server
+        run: ssh dockside "bash ~/dockside/scripts/prepare-server.sh '$DOCKERHUB_USERNAME'"
+
+      - name: Check server
+        run: |
+          ssh dockside 'cd ~/dockside \
+            && docker version --format "docker {{.Server.Version}}" \
+            && docker compose version \
+            && docker compose -f docker-compose.prod.yaml config --quiet && echo "compose ok" \
+            && stat -c "env mode %a" .env \
+            && sudo nginx -t \
+            && curl -s -o /dev/null -w "nginx on port 80 answers: %{http_code}\n" http://127.0.0.1/'
